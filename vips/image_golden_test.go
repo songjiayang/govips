@@ -109,6 +109,8 @@ func TestImage_TransformICCProfile_RGB_No_Profile(t *testing.T) {
 		},
 		func(result *ImageRef) {
 			assert.True(t, result.HasICCProfile())
+			iccProfileData := result.GetICCProfile()
+			assert.Greater(t, len(iccProfileData), 0)
 			assert.Equal(t, InterpretationSRGB, result.Interpretation())
 		}, nil)
 }
@@ -187,14 +189,39 @@ func TestImage_RemoveICCProfile(t *testing.T) {
 		}, nil)
 }
 
+// NOTE: The JPEG spec requires some minimal exif data including exif-ifd0-Orientation.
+// libvips always adds these fields back but they should not be a privacy concern.
+// HEIC images require the same fields and behave the same way in libvips.
 func TestImage_RemoveMetadata_Removes_Exif(t *testing.T) {
+	var initialEXIFCount int
 	goldenTest(t, resources+"heic-24bit-exif.heic",
 		func(img *ImageRef) error {
-			assert.True(t, img.HasExif())
+			exifData := img.GetExif()
+			initialEXIFCount = len(exifData)
+			assert.Greater(t, initialEXIFCount, 0)
 			return img.RemoveMetadata()
 		},
 		func(img *ImageRef) {
-			assert.False(t, img.HasExif())
+			exifData := img.GetExif()
+			finalEXIFCount := len(exifData)
+			assert.Less(t, finalEXIFCount, initialEXIFCount)
+		}, nil)
+}
+
+func TestImage_SetExifField(t *testing.T) {
+	var originalExifValue string
+	goldenTest(t, resources+"heic-24bit-exif.heic",
+		func(img *ImageRef) error {
+			originalExifValue = img.GetString("exif-ifd0-Model")
+			assert.NotEqual(t, originalExifValue, "iPhone (iPhone, ASCII, 7 components, 7 bytes)")
+			img.SetString("exif-ifd0-Model", "iPhone (iPhone, ASCII, 7 components, 7 bytes)")
+			updatedExifValue := img.GetString("exif-ifd0-Model")
+			assert.Equal(t, updatedExifValue, "iPhone (iPhone, ASCII, 7 components, 7 bytes)")
+			return nil
+		},
+		func(img *ImageRef) {
+			updatedExifValue := img.GetString("exif-ifd0-Model")
+			assert.Equal(t, updatedExifValue, "iPhone (iPhone, ASCII, 7 components, 7 bytes)")
 		}, nil)
 }
 
@@ -205,6 +232,19 @@ func TestImageRef_RemoveMetadata_Leave_Orientation(t *testing.T) {
 		},
 		func(result *ImageRef) {
 			assert.Equal(t, 5, result.Orientation())
+		}, nil)
+}
+
+// https://iptc.org/std/photometadata/specification/IPTC-PhotoMetadata#creator
+// https://iptc.org/std/photometadata/specification/IPTC-PhotoMetadata#credit-line
+// https://iptc.org/std/photometadata/specification/IPTC-PhotoMetadata#copyright-notice
+func TestImageRef_RemoveMetadata_Leave_Copyright(t *testing.T) {
+	goldenTest(t, resources+"copyright.jpeg",
+		func(img *ImageRef) error {
+			return img.RemoveMetadata("exif-ifd0-Copyright", "exif-ifd0-Artist")
+		},
+		func(result *ImageRef) {
+			assert.Contains(t, result.ImageFields(), "exif-ifd0-Copyright")
 		}, nil)
 }
 
@@ -293,6 +333,34 @@ func TestImage_AutoRotate_6__heic_to_jpg(t *testing.T) {
 		func(result *ImageRef) {
 			assert.Equal(t, 1, result.Orientation())
 		}, exportJpeg(nil),
+	)
+}
+
+func TestImage_Export_AVIF_8_Bit(t *testing.T) {
+	avifExportParams := NewAvifExportParams()
+	goldenTest(t, resources+"avif-8bit.avif",
+		func(img *ImageRef) error {
+			return nil
+		},
+		func(result *ImageRef) {
+		}, exportAvif(avifExportParams),
+	)
+}
+
+func TestImage_TIF_16_Bit_To_AVIF_12_Bit(t *testing.T) {
+	avifExportParams := NewAvifExportParams()
+	avifExportParams.Bitdepth = 12
+	goldenTest(t, resources+"tif-16bit.tif",
+		func(img *ImageRef) error {
+			// TIFF images don't use regular exif fields -- they iptc and/or xmp instead.
+			fields := img.GetFields()
+			assert.Greater(t, len(fields), 0)
+			xmpData := img.GetBlob("xmp-data")
+			assert.Greater(t, len(xmpData), 0)
+			return nil
+		},
+		func(result *ImageRef) {
+		}, exportAvif(avifExportParams),
 	)
 }
 
@@ -476,6 +544,9 @@ func TestImageRef_Divide(t *testing.T) {
 func TestImage_GaussianBlur(t *testing.T) {
 	goldenTest(t, resources+"jpg-24bit.jpg", func(img *ImageRef) error {
 		return img.GaussianBlur(10.5)
+	}, nil, nil)
+	goldenTest(t, resources+"jpg-24bit.jpg", func(img *ImageRef) error {
+		return img.GaussianBlur(10.5, 0.2)
 	}, nil, nil)
 }
 
@@ -724,7 +795,7 @@ func TestImage_Black(t *testing.T) {
 	assertGoldenMatch(t, resources+"jpg-24bit.jpg", buf, metadata.Format)
 }
 
-//vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --subsample-mode=auto --interlace --optimize-coding
+// vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --subsample-mode=auto --interlace --optimize-coding
 func TestImage_OptimizeCoding(t *testing.T) {
 	goldenTest(t, resources+"jpg-24bit-icc-iec.jpg",
 		nil,
@@ -739,7 +810,7 @@ func TestImage_OptimizeCoding(t *testing.T) {
 	)
 }
 
-//vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --subsample-mode=on
+// vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --subsample-mode=on
 func TestImage_SubsampleMode(t *testing.T) {
 	goldenTest(t, resources+"jpg-24bit-icc-iec.jpg",
 		nil,
@@ -752,7 +823,7 @@ func TestImage_SubsampleMode(t *testing.T) {
 	)
 }
 
-//vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --trellis-quant
+// vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --trellis-quant
 func TestImage_TrellisQuant(t *testing.T) {
 	goldenTest(t, resources+"jpg-24bit-icc-iec.jpg",
 		nil,
@@ -766,7 +837,7 @@ func TestImage_TrellisQuant(t *testing.T) {
 	)
 }
 
-//vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --overshoot-deringing
+// vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --overshoot-deringing
 func TestImage_OvershootDeringing(t *testing.T) {
 	goldenTest(t, resources+"jpg-24bit-icc-iec.jpg",
 		nil,
@@ -780,7 +851,7 @@ func TestImage_OvershootDeringing(t *testing.T) {
 	)
 }
 
-//vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --interlace --optimize-scans
+// vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --interlace --optimize-scans
 func TestImage_OptimizeScans(t *testing.T) {
 	goldenTest(t, resources+"jpg-24bit-icc-iec.jpg",
 		nil,
@@ -795,7 +866,7 @@ func TestImage_OptimizeScans(t *testing.T) {
 	)
 }
 
-//vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --quant-table=3
+// vips jpegsave resources/jpg-24bit-icc-iec.jpg test.jpg --Q=75 --profile=none --strip --quant-table=3
 func TestImage_QuantTable(t *testing.T) {
 	goldenTest(t, resources+"jpg-24bit-icc-iec.jpg",
 		nil,
@@ -838,6 +909,12 @@ func exportWebp(exportParams *WebpExportParams) func(img *ImageRef) ([]byte, *Im
 func exportJpeg(exportParams *JpegExportParams) func(img *ImageRef) ([]byte, *ImageMetadata, error) {
 	return func(img *ImageRef) ([]byte, *ImageMetadata, error) {
 		return img.ExportJpeg(exportParams)
+	}
+}
+
+func exportAvif(exportParams *AvifExportParams) func(img *ImageRef) ([]byte, *ImageMetadata, error) {
+	return func(img *ImageRef) ([]byte, *ImageMetadata, error) {
+		return img.ExportAvif(exportParams)
 	}
 }
 
@@ -939,6 +1016,7 @@ func goldenCreateTest(
 	require.NoError(t, err)
 
 	img2, err := createFromBuffer(buf2)
+	require.NoError(t, err)
 
 	err = exec(img2)
 	require.NoError(t, err)
@@ -957,26 +1035,28 @@ func goldenCreateTest(
 }
 
 func getEnvironment() string {
+	sanitizedVersion := strings.ReplaceAll(Version, ":", "-")
 	switch runtime.GOOS {
 	case "windows":
-		return "windows"
+		// Missing Windows version detection. Windows is not a supported CI target right now
+		return "windows_" + runtime.GOARCH + "_libvips-" + sanitizedVersion
 	case "darwin":
 		out, err := exec.Command("sw_vers", "-productVersion").Output()
 		if err != nil {
-			return "macos-unknown"
+			return "macos-unknown_" + runtime.GOARCH + "_libvips-" + sanitizedVersion
 		}
 		majorVersion := strings.Split(strings.TrimSpace(string(out)), ".")[0]
-		return "macos-" + majorVersion
+		return "macos-" + majorVersion + "_" + runtime.GOARCH + "_libvips-" + sanitizedVersion
 	case "linux":
 		out, err := exec.Command("lsb_release", "-cs").Output()
 		if err != nil {
-			return "linux"
+			return "linux-unknown_" + runtime.GOARCH
 		}
 		strout := strings.TrimSuffix(string(out), "\n")
-		return "linux-" + strout
+		return "linux-" + strout + "_" + runtime.GOARCH + "_libvips-" + sanitizedVersion
 	}
-	// default to linux assets otherwise
-	return "linux"
+	// default to unknown assets otherwise
+	return "unknown_" + runtime.GOARCH + "_libvips-" + sanitizedVersion
 }
 
 func assertGoldenMatch(t *testing.T, file string, buf []byte, format ImageType) {
